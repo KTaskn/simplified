@@ -50,7 +50,7 @@ class Config:
     decoder_layers: int = 6
     decoder_heads: int = 8
     decoder_ff_dim: int = 2048
-    decoder_dropout: float = 0.1
+    decoder_dropout: float = 0.2
 
     # --- Training ---
     batch_size: int = 1024

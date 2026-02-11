@@ -165,6 +165,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--vocab_size", type=int, default=None, help="SentencePiece vocab size (default: 8000)")
+    parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing (0=disabled)")
+    parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (0=disabled)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
@@ -262,7 +264,7 @@ def main():
         anneal_strategy="cos",
     )
 
-    criterion = nn.CrossEntropyLoss(ignore_index=cfg.pad_token_id)
+    criterion = nn.CrossEntropyLoss(ignore_index=cfg.pad_token_id, label_smoothing=args.label_smoothing)
     scaler = GradScaler(enabled=cfg.use_amp)
 
     writer = SummaryWriter(log_dir=str(run_dir / "logs"))
@@ -284,9 +286,12 @@ def main():
         best_val_loss = ckpt["best_val_loss"]
 
     # Training loop
+    patience = args.patience
+    patience_counter = 0
     print(f"\nStarting training for {cfg.epochs} epochs...")
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-    print(f"Batch size: {cfg.batch_size}, Total steps: {total_steps}\n")
+    print(f"Batch size: {cfg.batch_size}, Total steps: {total_steps}")
+    print(f"Label smoothing: {args.label_smoothing}, Early stopping patience: {patience}\n")
 
     for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
@@ -329,12 +334,18 @@ def main():
         # Save latest
         torch.save(ckpt_data, ckpt_dir / "latest.pt")
 
-        # Save best
+        # Save best + early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             ckpt_data["best_val_loss"] = best_val_loss
             torch.save(ckpt_data, ckpt_dir / "best.pt")
             print(f"  -> New best val loss: {best_val_loss:.4f}")
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience > 0 and patience_counter >= patience:
+                print(f"  -> Early stopping: val_loss did not improve for {patience} epochs")
+                break
 
     writer.close()
     print("\nTraining complete!")

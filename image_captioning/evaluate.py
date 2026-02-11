@@ -1,6 +1,7 @@
 """Evaluate trained model with BLEU scores on validation set."""
 
 import argparse
+import csv
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -155,17 +156,37 @@ def evaluate(cfg: Config, checkpoint_path: str, num_samples: int | None = None, 
         print(f"\nHypothesis: {hypotheses[i]}")
         print(f"References: {references_list[i][:3]}")
 
+    # Append BLEU result to eval CSV
+    results_csv = Path(cfg.output_dir) / f"eval_results_{cfg.dataset_variant}.csv"
+    write_header = not results_csv.exists()
+    with open(results_csv, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["variant", "model_size", "vocab_size",
+                         "bleu", "bleu1", "bleu2", "bleu3", "bleu4",
+                         "num_images", "checkpoint"])
+        w.writerow([cfg.dataset_variant, cfg.model_size, cfg.sp_vocab_size,
+                     f"{bleu.score:.2f}",
+                     f"{bleu.precisions[0]:.2f}", f"{bleu.precisions[1]:.2f}",
+                     f"{bleu.precisions[2]:.2f}", f"{bleu.precisions[3]:.2f}",
+                     len(hypotheses), checkpoint_path])
+
     return bleu
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", choices=["stair", "snow"], default="stair")
+    parser.add_argument("--model_size", choices=["base", "small", "tiny", "micro"], default="base")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--num_samples", type=int, default=None, help="Limit number of images to evaluate")
     parser.add_argument("--tokenizer_model_path", type=str, default="", help="Path to SentencePiece model")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size for evaluation")
+    parser.add_argument("--vocab_size", type=int, default=None, help="SentencePiece vocab size (default: 8000)")
     args = parser.parse_args()
 
-    cfg = Config(dataset_variant=args.variant)
+    kwargs = {"dataset_variant": args.variant, "model_size": args.model_size}
+    if args.vocab_size is not None:
+        kwargs["sp_vocab_size"] = args.vocab_size
+    cfg = Config(**kwargs)
     evaluate(cfg, args.checkpoint, args.num_samples, args.tokenizer_model_path, args.batch_size)

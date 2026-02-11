@@ -1,6 +1,7 @@
 """Training loop for Japanese Image Captioning model."""
 
 import argparse
+import csv
 import time
 from pathlib import Path
 
@@ -159,13 +160,18 @@ def validate(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", choices=["stair", "snow"], default="stair")
+    parser.add_argument("--model_size", choices=["base", "small", "tiny", "micro"], default="base")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--vocab_size", type=int, default=None, help="SentencePiece vocab size (default: 8000)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
-    cfg = Config(dataset_variant=args.variant)
+    kwargs = {"dataset_variant": args.variant, "model_size": args.model_size}
+    if args.vocab_size is not None:
+        kwargs["sp_vocab_size"] = args.vocab_size
+    cfg = Config(**kwargs)
     if args.epochs is not None:
         cfg.epochs = args.epochs
     if args.batch_size is not None:
@@ -175,10 +181,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print(f"Dataset variant: {cfg.dataset_variant}")
+    print(f"Dataset variant: {cfg.dataset_variant}, Model size: {cfg.model_size}")
+    print(f"Decoder: dim={cfg.decoder_dim}, layers={cfg.decoder_layers}, heads={cfg.decoder_heads}, ff={cfg.decoder_ff_dim}")
 
     # Output dirs
-    run_dir = Path(cfg.output_dir) / f"run_{cfg.dataset_variant}"
+    run_dir = Path(cfg.output_dir) / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
@@ -312,7 +319,9 @@ def main():
             "scheduler_state_dict": scheduler.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
             "train_loss": train_loss,
+            "train_acc": train_acc,
             "val_loss": val_loss,
+            "val_acc": val_acc,
             "best_val_loss": best_val_loss,
             "config": vars(cfg),
         }
@@ -331,6 +340,24 @@ def main():
     print("\nTraining complete!")
     print(f"Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved in {ckpt_dir}")
+
+    # Append result to grid CSV
+    results_csv = Path(cfg.output_dir) / f"grid_results_{cfg.dataset_variant}.csv"
+    write_header = not results_csv.exists()
+    with open(results_csv, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["variant", "model_size", "vocab_size", "trainable_params",
+                         "best_val_loss", "best_val_acc", "best_epoch", "epochs"])
+        best_ckpt_path = ckpt_dir / "best.pt"
+        best_epoch = -1
+        best_val_acc_value = 0.0
+        if best_ckpt_path.exists():
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_epoch = best_ckpt["epoch"] + 1
+            best_val_acc_value = best_ckpt.get("val_acc", 0.0)
+        w.writerow([cfg.dataset_variant, cfg.model_size, cfg.sp_vocab_size, total_params,
+                     f"{best_val_loss:.4f}", f"{best_val_acc_value:.4f}", best_epoch, cfg.epochs])
 
 
 if __name__ == "__main__":

@@ -48,14 +48,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("images", nargs="+", help="Path(s) to image file(s)")
     parser.add_argument("--variant", choices=["stair", "snow"], default="stair")
+    parser.add_argument("--model_size", choices=["base", "small", "tiny", "micro"], default="base")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--tokenizer_model_path", type=str, default="", help="Path to SentencePiece model")
     parser.add_argument("--num_captions", type=int, default=1, help="Number of captions per image")
     parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature (0=greedy)")
     parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling (0=disabled)")
+    parser.add_argument("--vocab_size", type=int, default=None, help="SentencePiece vocab size (default: 8000)")
     args = parser.parse_args()
 
-    cfg = Config(dataset_variant=args.variant)
+    kwargs = {"dataset_variant": args.variant, "model_size": args.model_size}
+    if args.vocab_size is not None:
+        kwargs["sp_vocab_size"] = args.vocab_size
+    cfg = Config(**kwargs)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load tokenizer

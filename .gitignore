@@ -1,0 +1,33 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === COCO images (large, download separately) ===
+coco_images/
+
+# === Training outputs (checkpoints, logs, tokenizer artifacts) ===
+outputs/
+stair_outputs/
+snow_outputs/
+
+# === Data files ===
+*.zip
+*.json
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+
+# === Claude Code ===
+.claude/
+
+# === Misc ===
+*.log

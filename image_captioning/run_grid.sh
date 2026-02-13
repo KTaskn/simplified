@@ -14,6 +14,13 @@ echo "  Model sizes: ${MODEL_SIZES[*]}"
 echo "  Vocab sizes: ${VOCAB_SIZES[*]}"
 echo "  Total runs: $(( ${#MODEL_SIZES[@]} * ${#VOCAB_SIZES[@]} ))"
 
+# Step 0: Cache CLIP features (one-time, shared across all runs)
+echo ""
+echo "########################################"
+echo "  Step 0: Caching CLIP features"
+echo "########################################"
+python cache_features.py --variant "$VARIANT" --split both
+
 # Step 1: Train all tokenizers first (shared across model sizes)
 echo ""
 echo "########################################"
@@ -38,7 +45,7 @@ for SIZE in "${MODEL_SIZES[@]}"; do
         echo "======================================"
         echo "  Training: ${VARIANT} / ${SIZE} / v${VSIZE}"
         echo "======================================"
-        python train.py --variant "$VARIANT" --model_size "$SIZE" --vocab_size "$VSIZE"
+        python train.py --variant "$VARIANT" --model_size "$SIZE" --vocab_size "$VSIZE" --use_cache --auto_batch
 
         # Determine checkpoint path
         RUN_NAME="run_${VARIANT}_${SIZE}"

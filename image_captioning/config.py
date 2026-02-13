@@ -97,6 +97,10 @@ class Config:
         return str(Path(self.output_dir) / "tokenizer" / f"{self.tokenizer_prefix}.model")
 
     @property
+    def clip_cache_dir(self) -> str:
+        return str(Path(self.output_dir) / "clip_cache")
+
+    @property
     def run_name(self) -> str:
         name = f"run_{self.dataset_variant}_{self.model_size}"
         if self.sp_vocab_size != 8000:

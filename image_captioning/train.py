@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from config import Config
-from dataset import CocoCaptionDataset
+from dataset import CachedCaptionDataset, CocoCaptionDataset
 from model import ImageCaptionModel
 
 
@@ -28,6 +28,74 @@ def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor, pad_token_id: 
     return correct / mask.sum().item()
 
 
+def find_max_batch_size(
+    model: ImageCaptionModel,
+    device: torch.device,
+    cfg: Config,
+    use_cache: bool,
+    min_bs: int = 256,
+    max_bs: int = 32768,
+) -> int:
+    """Binary search for the maximum batch size that fits in GPU memory."""
+    from torch.cuda.amp import autocast
+
+    seq_len = cfg.max_caption_length - 1  # input length after shift
+
+    def try_batch(bs: int) -> bool:
+        try:
+            torch.cuda.empty_cache()
+            model.train()
+            if not use_cache:
+                model.clip_vision.eval()
+
+            if use_cache:
+                dummy_img = torch.randn(bs, 50, cfg.clip_embed_dim, device=device)
+            else:
+                dummy_img = torch.randn(bs, 3, 224, 224, device=device)
+            dummy_ids = torch.randint(0, cfg.sp_vocab_size, (bs, seq_len), device=device)
+            dummy_mask = torch.ones(bs, seq_len, device=device)
+
+            with autocast(enabled=cfg.use_amp):
+                if use_cache:
+                    logits = model(caption_ids=dummy_ids, caption_mask=dummy_mask,
+                                   image_features=dummy_img)
+                else:
+                    logits = model(pixel_values=dummy_img, caption_ids=dummy_ids,
+                                   caption_mask=dummy_mask)
+                loss = logits.sum()  # simple loss for memory test
+            loss.backward()
+            model.zero_grad()
+            torch.cuda.empty_cache()
+            return True
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                model.zero_grad()
+                torch.cuda.empty_cache()
+                return False
+            raise
+
+    # Binary search
+    low, high = min_bs, max_bs
+    best_bs = min_bs
+
+    while low <= high:
+        mid = (low + high) // 2
+        # Round to nearest multiple of 256 for efficiency
+        mid = max(min_bs, (mid // 256) * 256)
+        if mid == best_bs and mid != min_bs:
+            break
+        print(f"  Trying batch_size={mid}...", end=" ", flush=True)
+        if try_batch(mid):
+            print("OK")
+            best_bs = mid
+            low = mid + 256
+        else:
+            print("OOM")
+            high = mid - 256
+
+    return best_bs
+
+
 def train_one_epoch(
     model: ImageCaptionModel,
     dataloader: DataLoader,
@@ -40,10 +108,12 @@ def train_one_epoch(
     epoch: int,
     writer: SummaryWriter,
     global_step: int,
+    use_cache: bool = False,
 ) -> tuple[float, float, int]:
     model.train()
-    # Keep CLIP frozen
-    model.clip_vision.eval()
+    if not use_cache:
+        # Keep CLIP frozen
+        model.clip_vision.eval()
 
     total_loss = 0.0
     total_correct = 0
@@ -51,8 +121,8 @@ def train_one_epoch(
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{cfg.epochs} [Train]")
-    for pixel_values, caption_ids, caption_mask in pbar:
-        pixel_values = pixel_values.to(device)
+    for batch_images, caption_ids, caption_mask in pbar:
+        batch_images = batch_images.to(device)
         caption_ids = caption_ids.to(device)
         caption_mask = caption_mask.to(device)
 
@@ -64,7 +134,12 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         with autocast(enabled=cfg.use_amp):
-            logits = model(pixel_values, input_ids, input_mask)
+            if use_cache:
+                logits = model(caption_ids=input_ids, caption_mask=input_mask,
+                               image_features=batch_images)
+            else:
+                logits = model(pixel_values=batch_images, caption_ids=input_ids,
+                               caption_mask=input_mask)
             # logits: (batch, seq_len, vocab_size)
             loss = criterion(
                 logits.reshape(-1, logits.size(-1)),
@@ -115,6 +190,7 @@ def validate(
     device: torch.device,
     cfg: Config,
     epoch: int,
+    use_cache: bool = False,
 ) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
@@ -123,8 +199,8 @@ def validate(
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{cfg.epochs} [Val]")
-    for pixel_values, caption_ids, caption_mask in pbar:
-        pixel_values = pixel_values.to(device)
+    for batch_images, caption_ids, caption_mask in pbar:
+        batch_images = batch_images.to(device)
         caption_ids = caption_ids.to(device)
         caption_mask = caption_mask.to(device)
 
@@ -133,7 +209,12 @@ def validate(
         input_mask = caption_mask[:, :-1]
 
         with autocast(enabled=cfg.use_amp):
-            logits = model(pixel_values, input_ids, input_mask)
+            if use_cache:
+                logits = model(caption_ids=input_ids, caption_mask=input_mask,
+                               image_features=batch_images)
+            else:
+                logits = model(pixel_values=batch_images, caption_ids=input_ids,
+                               caption_mask=input_mask)
             loss = criterion(
                 logits.reshape(-1, logits.size(-1)),
                 target_ids.reshape(-1),
@@ -167,6 +248,8 @@ def main():
     parser.add_argument("--vocab_size", type=int, default=None, help="SentencePiece vocab size (default: 8000)")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing (0=disabled)")
     parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (0=disabled)")
+    parser.add_argument("--use_cache", action="store_true", help="Use pre-cached CLIP features")
+    parser.add_argument("--auto_batch", action="store_true", help="Auto-find max batch size for GPU")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
@@ -193,42 +276,68 @@ def main():
     ckpt_dir.mkdir(exist_ok=True)
 
     # Datasets
-    print("Loading datasets...")
-    train_dataset = CocoCaptionDataset(
-        caption_json=cfg.train_json,
-        image_dir=cfg.coco_image_dir,
-        sp_model_path=cfg.tokenizer_model_path,
-        clip_model_name=cfg.clip_model_name,
-        max_length=cfg.max_caption_length,
-        split="train",
-    )
-    val_dataset = CocoCaptionDataset(
-        caption_json=cfg.val_json,
-        image_dir=cfg.coco_image_dir,
-        sp_model_path=cfg.tokenizer_model_path,
-        clip_model_name=cfg.clip_model_name,
-        max_length=cfg.max_caption_length,
-        split="val",
-    )
+    use_cache = args.use_cache
+    if use_cache:
+        cache_dir = Path(cfg.output_dir) / "clip_cache"
+        train_cache = cache_dir / "train.pt"
+        val_cache = cache_dir / "val.pt"
+        if not train_cache.exists() or not val_cache.exists():
+            print("ERROR: Cache files not found. Run cache_features.py first.")
+            print(f"  Expected: {train_cache}, {val_cache}")
+            return
+        print("Loading datasets (cached CLIP features)...")
+        train_dataset = CachedCaptionDataset(
+            caption_json=cfg.train_json,
+            cache_path=str(train_cache),
+            sp_model_path=cfg.tokenizer_model_path,
+            max_length=cfg.max_caption_length,
+        )
+        val_dataset = CachedCaptionDataset(
+            caption_json=cfg.val_json,
+            cache_path=str(val_cache),
+            sp_model_path=cfg.tokenizer_model_path,
+            max_length=cfg.max_caption_length,
+        )
+        # Cached features are in-memory, fewer workers needed
+        num_workers = min(cfg.num_workers, 4)
+    else:
+        print("Loading datasets...")
+        train_dataset = CocoCaptionDataset(
+            caption_json=cfg.train_json,
+            image_dir=cfg.coco_image_dir,
+            sp_model_path=cfg.tokenizer_model_path,
+            clip_model_name=cfg.clip_model_name,
+            max_length=cfg.max_caption_length,
+            split="train",
+        )
+        val_dataset = CocoCaptionDataset(
+            caption_json=cfg.val_json,
+            image_dir=cfg.coco_image_dir,
+            sp_model_path=cfg.tokenizer_model_path,
+            clip_model_name=cfg.clip_model_name,
+            max_length=cfg.max_caption_length,
+            split="val",
+        )
+        num_workers = cfg.num_workers
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.batch_size,
         shuffle=False,
-        num_workers=cfg.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     # Model
@@ -250,6 +359,26 @@ def main():
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in trainable_params)
     print(f"Trainable parameters: {total_params:,}")
+
+    # Auto batch size
+    if args.auto_batch and device.type == "cuda":
+        print("Auto-detecting max batch size...")
+        optimal_bs = find_max_batch_size(model, device, cfg, use_cache)
+        print(f"Auto batch size: {optimal_bs} (was {cfg.batch_size})")
+        cfg.batch_size = optimal_bs
+        # Rebuild DataLoaders with new batch size
+        train_loader = DataLoader(
+            train_dataset, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=4 if num_workers > 0 else None,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=cfg.batch_size, shuffle=False,
+            num_workers=num_workers, pin_memory=True,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=4 if num_workers > 0 else None,
+        )
 
     optimizer = torch.optim.AdamW(
         trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay
@@ -298,9 +427,9 @@ def main():
 
         train_loss, train_acc, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler, scaler,
-            criterion, device, cfg, epoch, writer, global_step,
+            criterion, device, cfg, epoch, writer, global_step, use_cache,
         )
-        val_loss, val_acc = validate(model, val_loader, criterion, device, cfg, epoch)
+        val_loss, val_acc = validate(model, val_loader, criterion, device, cfg, epoch, use_cache)
 
         elapsed = time.time() - t0
         print(

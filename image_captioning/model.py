@@ -126,20 +126,25 @@ class ImageCaptionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: torch.Tensor,
-        caption_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        caption_ids: torch.Tensor = None,
         caption_mask: torch.Tensor | None = None,
+        image_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Full forward pass: image -> caption logits.
 
         Args:
-            pixel_values: (batch, 3, H, W) CLIP-preprocessed images
+            pixel_values: (batch, 3, H, W) CLIP-preprocessed images (used if image_features is None)
             caption_ids: (batch, seq_len) input token IDs (teacher forcing)
             caption_mask: (batch, seq_len) attention mask
+            image_features: (batch, seq_len_img, clip_dim) pre-cached CLIP features
 
         Returns: (batch, seq_len, vocab_size) logits
         """
-        memory = self.encode_image(pixel_values)
+        if image_features is not None:
+            memory = self.projection(image_features)
+        else:
+            memory = self.encode_image(pixel_values)
         logits = self.decode(caption_ids, memory, caption_mask)
         return logits
 

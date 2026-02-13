@@ -85,7 +85,7 @@ def main():
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
 
     print(f"Model loaded (epoch {ckpt['epoch']+1}, val_loss={ckpt['val_loss']:.4f})")

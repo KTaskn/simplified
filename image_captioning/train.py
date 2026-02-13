@@ -35,17 +35,23 @@ def find_max_batch_size(
     use_cache: bool,
     min_bs: int = 256,
     max_bs: int = 32768,
+    safety_factor: float = 0.85,
 ) -> int:
-    """Binary search for the maximum batch size that fits in GPU memory."""
+    """Binary search for the maximum batch size that fits in GPU memory.
+
+    Uses a realistic loss (CrossEntropyLoss) to match actual training memory usage.
+    Applies safety_factor to avoid borderline OOM during real training.
+    """
     from torch.cuda.amp import autocast
 
     seq_len = cfg.max_caption_length - 1  # input length after shift
+    criterion = nn.CrossEntropyLoss(ignore_index=cfg.pad_token_id)
 
     def try_batch(bs: int) -> bool:
+        torch.cuda.empty_cache()
         try:
-            torch.cuda.empty_cache()
             model.train()
-            if not use_cache:
+            if not use_cache and model.clip_vision is not None:
                 model.clip_vision.eval()
 
             if use_cache:
@@ -53,6 +59,7 @@ def find_max_batch_size(
             else:
                 dummy_img = torch.randn(bs, 3, 224, 224, device=device)
             dummy_ids = torch.randint(0, cfg.sp_vocab_size, (bs, seq_len), device=device)
+            dummy_targets = torch.randint(0, cfg.sp_vocab_size, (bs, seq_len), device=device)
             dummy_mask = torch.ones(bs, seq_len, device=device)
 
             with autocast(enabled=cfg.use_amp):
@@ -62,27 +69,29 @@ def find_max_batch_size(
                 else:
                     logits = model(pixel_values=dummy_img, caption_ids=dummy_ids,
                                    caption_mask=dummy_mask)
-                loss = logits.sum()  # simple loss for memory test
+                loss = criterion(logits.reshape(-1, logits.size(-1)), dummy_targets.reshape(-1))
             loss.backward()
-            model.zero_grad()
+
+            # Clean up explicitly
+            del dummy_img, dummy_ids, dummy_targets, dummy_mask, logits, loss
+            model.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             return True
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                model.zero_grad()
+                model.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
                 return False
             raise
 
-    # Binary search
+    # Binary search (in steps of 256)
     low, high = min_bs, max_bs
     best_bs = min_bs
 
     while low <= high:
         mid = (low + high) // 2
-        # Round to nearest multiple of 256 for efficiency
         mid = max(min_bs, (mid // 256) * 256)
-        if mid == best_bs and mid != min_bs:
+        if mid <= best_bs and low > min_bs:
             break
         print(f"  Trying batch_size={mid}...", end=" ", flush=True)
         if try_batch(mid):
@@ -93,7 +102,12 @@ def find_max_batch_size(
             print("OOM")
             high = mid - 256
 
-    return best_bs
+    # Apply safety margin
+    safe_bs = max(min_bs, (int(best_bs * safety_factor) // 256) * 256)
+    if safe_bs != best_bs:
+        print(f"  Applying {int(safety_factor*100)}% safety margin: {best_bs} -> {safe_bs}")
+
+    return safe_bs
 
 
 def train_one_epoch(
@@ -353,6 +367,7 @@ def main():
         clip_embed_dim=cfg.clip_embed_dim,
         max_length=cfg.max_caption_length,
         pad_token_id=cfg.pad_token_id,
+        skip_clip=use_cache,
     ).to(device)
 
     # Only optimize non-frozen parameters
@@ -406,7 +421,7 @@ def main():
     if args.resume:
         print(f"Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         scaler.load_state_dict(ckpt["scaler_state_dict"])

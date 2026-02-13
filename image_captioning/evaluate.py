@@ -80,7 +80,7 @@ def evaluate(cfg: Config, checkpoint_path: str, num_samples: int | None = None, 
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt['epoch']+1}, val_loss={ckpt['val_loss']:.4f}")
 

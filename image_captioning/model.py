@@ -20,18 +20,23 @@ class ImageCaptionModel(nn.Module):
         clip_embed_dim: int = 768,
         max_length: int = 64,
         pad_token_id: int = 0,
+        skip_clip: bool = False,
     ):
         super().__init__()
         self.pad_token_id = pad_token_id
         self.decoder_dim = decoder_dim
         self.max_length = max_length
+        self.skip_clip = skip_clip
 
         # --- CLIP Vision Encoder (frozen) ---
-        clip_model = CLIPModel.from_pretrained(clip_model_name, use_safetensors=True)
-        self.clip_vision = clip_model.vision_model
-        for param in self.clip_vision.parameters():
-            param.requires_grad = False
-        self.clip_vision.eval()
+        if not skip_clip:
+            clip_model = CLIPModel.from_pretrained(clip_model_name, use_safetensors=True)
+            self.clip_vision = clip_model.vision_model
+            for param in self.clip_vision.parameters():
+                param.requires_grad = False
+            self.clip_vision.eval()
+        else:
+            self.clip_vision = None
 
         # CLIP ViT outputs: (batch, num_patches+1, hidden_dim)
         # We use all patch tokens as memory for cross-attention
@@ -75,6 +80,8 @@ class ImageCaptionModel(nn.Module):
 
         Returns: (batch, num_patches+1, decoder_dim)
         """
+        if self.clip_vision is None:
+            raise RuntimeError("CLIP vision encoder not loaded (skip_clip=True). Use image_features instead.")
         self.clip_vision.eval()
         clip_output = self.clip_vision(pixel_values=pixel_values)
         # last_hidden_state: (batch, seq_len, hidden_dim), seq_len = num_patches + 1 (CLS)

@@ -1,0 +1,9 @@
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+sentencepiece>=0.1.99
+Pillow>=9.0.0
+tqdm>=4.60.0
+sacrebleu>=2.3.0
+tensorboard>=2.13.0
+sacrebleu[ja]

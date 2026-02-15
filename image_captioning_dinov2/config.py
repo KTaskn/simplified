@@ -31,8 +31,8 @@ class Config:
     model_size: str = "base"
 
     # --- DINOv2 Encoder ---
-    encoder_model_name: str = "facebook/dinov2-vits14"
-    encoder_embed_dim: int = 384  # ViT-S/14 output dim
+    encoder_model_name: str = "facebook/dinov2-small"
+    encoder_embed_dim: int = 384  # ViT-S/14 output dim (22.1M params)
 
     # --- Tokenizer (shared with CLIP version) ---
     sp_vocab_size: int = 8000
